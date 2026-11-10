@@ -1,5 +1,5 @@
 ---
-title: "Prioritizing Potential Marine Aquaculture on the US West Coast"
+title: "Optimal Marine Aquaculture Zone analysis on the US West Coast"
 author: "Ashwin Chockkalingam"
 date: 11/08/2026
 format: pdf
@@ -12,7 +12,7 @@ execute:
 
 # Summary
 
-In this project our goal was to build a function that could take a species' minimum and maximum optimal growing temperature, and minimum and maximum optimal growing depth, to find which Exclusive Economic Zones (EEZ) on the West Coast of the United States were best suited to developing marine aquaculture. We specifically took a look at oysters (several species) and the Japanese Carpet Shell (Ruditapes philippinarum)
+In this project our goal was to build a function that could take a species' minimum and maximum optimal growing temperature, and minimum and maximum optimal growing depth, to find which Exclusive Economic Zones (EEZ) on the West Coast of the United States were best suited to developing it in marine aquaculture. We specifically took analyzed oysters (several species) and the Japanese Carpet Shell (Ruditapes philippinarum)
 
 # Initializing (loading libraries and data)
 
