@@ -1,0 +1,324 @@
+---
+title: "Prioritizing Potential Marine Aquaculture on the US West Coast"
+author: "Ashwin Chockkalingam"
+date: 11/08/2026
+format: pdf
+execute:
+  warning: false
+  message: false
+  fig-width: 6.5
+  fig-height: 5.5
+---
+
+# Summary
+
+In this project our goal was to build a function that could take a species' minimum and maximum optimal growing temperature, and minimum and maximum optimal growing depth, to find which Exclusive Economic Zones (EEZ) on the West Coast of the United States were best suited to developing marine aquaculture. We specifically took a look at oysters (several species) and the Japanese Carpet Shell (Ruditapes philippinarum)
+
+# Initializing (loading libraries and data)
+
+```{r}
+# Load libraries in
+library(sf)
+library(terra)
+library(tidyverse)
+library(tmap)
+library(here)
+library(kableExtra)
+```
+
+Data used in this analysis:
+
+- `sst_files` - Sea surface temperature data from the years 2008 to 2012. Provided by NOAA.
+- `wc_regions_clean.shp` - Exclusive economic zone marine boundary data for the west coast of the U.S. Provided by Marineregions.org
+- `depth.tif` - Ocean Depth/Bathymetry data. From the general Bathymetric Chart of the Oceans. 
+
+
+```{r}
+# Load data and preliminary checks
+## Load in shapefile for the West Coast EEZ vector
+wc_eez <- read_sf(here("data", "wc_regions_clean.shp"))
+
+## Load in bathymetry raster
+depth <- rast(here("data", "depth.tif"))
+
+## Load in sea surface temp (sst) raster, combine files
+sst_files <- list.files(path = here("data"), pattern = "sst", full.names = TRUE)
+sst_stack <- rast(sst_files)
+
+## Confirm all five years loaded as separate layers
+if (nlyr(sst_stack) != 5) {
+  warning(
+    "SST stack does not contain 5 layers; check that all year files loaded"
+  )
+}
+```
+
+## Verify coordinate reference systems
+
+```{r}
+## Check whether the CRS's match
+if (st_crs(wc_eez) != st_crs(depth)) {
+  warning("EEZ and depth CRS do not match; transformation required")
+}
+
+if (st_crs(depth) != st_crs(sst_stack)) {
+  warning("Depth and SST CRS do not match; transformation required")
+}
+```
+
+# Process data
+
+```{r}
+# Process data
+## combine all the layers into one by taking the average
+sst_avg <- app(sst_stack, fun = mean)
+
+## converting values to celcius from the original kelvin
+sst_avg_C <- sst_avg - 273.15
+
+## crop depth raster to match the extent of the sst raster
+depth_crop <- crop(depth, sst_avg_C)
+
+## resample depth (higher res) with bilinear method
+depth_resamp <- resample(depth_crop, y = sst_avg_C, method = "bilinear")
+
+## make crs labels match
+crs(sst_avg_C) <- crs(depth_resamp)
+```
+
+```{r}
+## check depth_resamp and sst_avg_C on all metrics (resolution, extent, crs, and whether its stackable)
+if (!all(res(sst_avg_C) == res(depth_resamp))) {
+  warning("Resolutions do not match after resampling")
+}
+
+if (ext(sst_avg_C) != ext(depth_resamp)) {
+  warning("Extents do not match after resampling")
+}
+
+if (st_crs(sst_avg_C) != st_crs(depth_resamp)) {
+  warning("Coordinate reference systems do not match after resampling")
+}
+
+aligned_stack <- c(sst_avg_C, depth_resamp)
+```
+
+# Find suitable locations
+
+```{r}
+# Find suitable locations
+
+## reclassify sst and depth for oyster
+rcl_oyster_sst <- matrix(
+  c(-Inf, 11, 0, 11, 30, 1, 30, Inf, 0),
+  ncol = 3,
+  byrow = TRUE
+)
+
+rcl_oyster_depth <- matrix(
+  c(-Inf, -70, 0, -70, 0, 1, 0, Inf, 0),
+  ncol = 3,
+  byrow = TRUE
+)
+
+## apply matrices
+sst_reclass <- classify(sst_avg_C, rcl = rcl_oyster_sst)
+depth_reclass <- classify(depth_resamp, rcl = rcl_oyster_depth)
+
+## confirm reclassification produced only 0s and 1s
+if (!all(unique(values(sst_reclass, na.rm = TRUE)) %in% c(0, 1))) {
+  warning("SST reclassification produced values other than 0 and 1")
+}
+
+# stack reclassed rasters
+sst_depth_stack <- c(sst_reclass, depth_reclass)
+
+# define layer multiplication function
+mult <- function(lay1, lay2) {
+  lay1 * lay2
+}
+
+# apply the function
+suitable_rast <- lapp(sst_depth_stack, fun = mult)
+```
+
+# Determine the most suitable EEZ
+
+```{r}
+# Determine the most suitable EEZ
+
+## Area of grid cells
+area_rast <- cellSize(suitable_rast, unit = "km")
+
+## multiply rasters to get areas of suitable cells
+suitable_area_rast <- suitable_rast * area_rast
+
+## Rasterize eez
+eez_raster <- rasterize(wc_eez, suitable_area_rast, field = "rgn_id")
+
+## find which zone has the most suitable cells by area
+most_suitable <- zonal(
+  suitable_area_rast,
+  eez_raster,
+  fun = "sum",
+  na.rm = TRUE
+)
+
+## Left Join
+most_suitable_oyster <- left_join(wc_eez, most_suitable, by = "rgn_id")
+most_suitable_oyster <- rename(most_suitable_oyster, suitable_area_km2 = lyr1)
+```
+
+```{r}
+## table of results, with suitable area also expressed as a share of each EEZ
+most_suitable_oyster %>%
+  st_drop_geometry() %>%
+  select(rgn, suitable_area_km2, area_km2) %>%
+  mutate(
+    pct_of_eez = round(100 * suitable_area_km2 / area_km2, 2),
+    suitable_area_km2 = round(suitable_area_km2, 1),
+    area_km2 = round(area_km2, 1)
+  ) %>%
+  arrange(desc(suitable_area_km2)) %>%
+  kable(
+    col.names = c(
+      "EEZ region",
+      "Suitable area (sq km)",
+      "Total EEZ area (sq km)",
+      "Percent of EEZ suitable"
+    ),
+    caption = "Suitable aquaculture area for oysters by West Coast EEZ"
+  ) %>%
+  kable_styling(bootstrap_options = "striped", latex_options = "hold_position")
+```
+
+Central California rankes the highest in terms of raw suitable area with 3,656.8 square kilometers. However in terms of a percentage of suitable area to total area Washington is the highest at 3.64 percent.
+
+# Generalizing the workflow
+
+This function takes the following arguments:
+
+- `min_temp` - Minimum optimal growth temperature 
+- `max_temp` - Maximum optimal growth temperature
+- `min_depth` - Minimum optimal growth depth
+- `max_depth` - Maximum optimal growth depth
+- `species_name` - Name of the species
+
+The function outputs:
+
+- A map of the different zones with the hue of blue representing different amounts of suitable area. 
+
+```{r}
+# Function creation
+suitability_map <- function(
+  min_temp,
+  max_temp,
+  min_depth,
+  max_depth,
+  species_name
+) {
+  # Check that user did not accidentally flip min and max temp
+  if (min_temp >= max_temp) {
+    stop("min_temp must be less than max_temp")
+  }
+
+  # Check that user did not accidentally flip min and max depth
+  if (min_depth >= max_depth) {
+    stop(
+      "min_depth must be less than max_depth (both are negative values below sea level)"
+    )
+  }
+
+  # Find suitable locations
+
+  ## reclassify sst and depth
+  rcl_sst <- matrix(
+    c(-Inf, min_temp, 0, min_temp, max_temp, 1, max_temp, Inf, 0),
+    ncol = 3,
+    byrow = TRUE
+  )
+
+  rcl_depth <- matrix(
+    c(-Inf, min_depth, 0, min_depth, max_depth, 1, max_depth, Inf, 0),
+    ncol = 3,
+    byrow = TRUE
+  )
+
+  ## apply matrices
+  sst_reclass <- classify(sst_avg_C, rcl = rcl_sst)
+  depth_reclass <- classify(depth_resamp, rcl = rcl_depth)
+
+  # apply the function
+  suitable_rast <- lapp(c(sst_reclass, depth_reclass), fun = mult)
+
+  # Determine the most suitable EEZ
+
+  ## multiply rasters to get areas of suitable cells
+  suitable_area_rast <- suitable_rast * area_rast
+
+  ## Rasterize eez
+  eez_raster <- rasterize(wc_eez, suitable_area_rast, field = "rgn_id")
+
+  ## find which zone has the most suitable cells by area
+  most_suitable <- zonal(
+    suitable_area_rast,
+    eez_raster,
+    fun = "sum",
+    na.rm = TRUE
+  )
+
+  ## Left Join
+  eez_suitable <- left_join(wc_eez, most_suitable, by = "rgn_id")
+  eez_suitable <- rename(eez_suitable, suitable_area_km2 = lyr1)
+
+  # Plot
+  ## continuous scale rather than classed intervals, since the distribution of
+  ## suitable area varies by species and binning produced degenerate breaks
+  tm_shape(eez_suitable) +
+    tm_polygons(
+      fill = "suitable_area_km2",
+      fill.scale = tm_scale_continuous(),
+      fill.legend = tm_legend(title = "Suitable area (sq km)")
+    ) +
+    tm_graticules() +
+    tm_compass(position = c("left", "top"), size = 1.5) +
+    tm_scalebar(position = c("left", "bottom"), text.size = 0.5) +
+    tm_title(
+      text = paste(
+        "Suitable Aquaculture Area for",
+        species_name,
+        "by West Coast EEZ"
+      )
+    ) +
+    tm_layout(legend.outside = TRUE, legend.outside.size = 0.2)
+}
+```
+
+## Oysters
+
+```{r}
+# Test function works with oyster
+suitability_map(11, 30, -70, 0, "Oysters")
+```
+
+## Japanese carpet shell (*Ruditapes philippinarum*)
+
+I chose Japanese carpet shell as my species of choice. 
+
+```{r}
+# Test function works with species of choice (manila clam)
+suitability_map(0, 23, -30, 0, "Japanese Carpet Shell")
+```
+
+According to our method Washington is the most suitable economic exclusive zone for Japanese Carpet Shell
+
+# Data citations
+
+- NOAA Coral Reef Watch 5km Daily Global Satellite Sea Surface Temperature
+  Anomaly v3.1
+- GEBCO Compilation Group (2022) GEBCO_2022 Grid,
+  doi:10.5285/e0f0bb80-ab44-2739-e053-6c86abc0289c
+- Marineregions.org, Exclusive Economic Zones
+- FAO (2009) Cultured aquatic species fact sheet, Ruditapes philippinarum, text
+  by Goulletquer, P.
+- SeaLifeBase, Ruditapes philippinarum species summary, citing SAUP Database 2006
